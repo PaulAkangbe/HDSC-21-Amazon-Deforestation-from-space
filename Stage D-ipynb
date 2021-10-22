@@ -1,0 +1,297 @@
+import sys
+import os
+import random
+import subprocess
+from tqdm import tqdm
+
+from six import string_types
+
+# Make sure you have all of these packages installed, e.g. via pip
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+import plotly.express as px
+import scipy
+from skimage import io
+from scipy import ndimage
+from IPython.display import display
+%matplotlib inline
+!ls -lha ../input/planets-dataset/planet/planet
+Setup
+Set PLANET_KAGGLE_ROOT to the proper directory where we've got the TIFF and JPEG zip files, and accompanying CSVs.
+
+PLANET_KAGGLE_ROOT = os.path.abspath("../input/planets-dataset/planet/planet")
+PLANET_KAGGLE_JPEG_DIR = os.path.join(PLANET_KAGGLE_ROOT, 'train-jpg')
+PLANET_KAGGLE_LABEL_CSV = os.path.join(PLANET_KAGGLE_ROOT, 'train_classes.csv')
+assert os.path.exists(PLANET_KAGGLE_ROOT)
+assert os.path.exists(PLANET_KAGGLE_JPEG_DIR)
+assert os.path.exists(PLANET_KAGGLE_LABEL_CSV)
+Inspect image labels
+The labels are in a CSV entitled train.csv. Note that each image can be tagged with multiple tags. We'll convert them to a "one hot" style representation where each label is a column:
+
+labels_df = pd.read_csv(PLANET_KAGGLE_LABEL_CSV)
+labels_df.head()
+image_name	tags
+0	train_0	haze primary
+1	train_1	agriculture clear primary water
+2	train_2	clear primary
+3	train_3	clear primary
+4	train_4	agriculture clear habitation primary road
+# Build list with unique labels
+label_list = []
+for tag_str in labels_df.tags.values:
+    labels = tag_str.split(' ')
+    for label in labels:
+        if label not in label_list:
+            label_list.append(label)
+# Add onehot features for every label
+for label in label_list:
+    labels_df[label] = labels_df['tags'].apply(lambda x: 1 if label in x.split(' ') else 0)
+# Display head
+labels_df.head()
+image_name	tags	haze	primary	agriculture	clear	water	habitation	road	cultivation	slash_burn	cloudy	partly_cloudy	conventional_mine	bare_ground	artisinal_mine	blooming	selective_logging	blow_down
+0	train_0	haze primary	1	1	0	0	0	0	0	0	0	0	0	0	0	0	0	0	0
+1	train_1	agriculture clear primary water	0	1	1	1	1	0	0	0	0	0	0	0	0	0	0	0	0
+2	train_2	clear primary	0	1	0	1	0	0	0	0	0	0	0	0	0	0	0	0	0
+3	train_3	clear primary	0	1	0	1	0	0	0	0	0	0	0	0	0	0	0	0	0
+4	train_4	agriculture clear habitation primary road	0	1	1	1	0	1	1	0	0	0	0	0	0	0	0	0	0
+# Histogram of label instances
+labels_df[label_list].sum().sort_values().plot.bar()
+<matplotlib.axes._subplots.AxesSubplot at 0x7fabeb4c3e10>
+
+def make_cooccurence_matrix(labels):
+    numeric_df = labels_df[labels]; 
+    c_matrix = numeric_df.T.dot(numeric_df)
+    sns.heatmap(c_matrix, cmap ="Blues")
+    return c_matrix
+    
+# Compute the co-ocurrence matrix
+make_cooccurence_matrix(label_list)
+haze	primary	agriculture	clear	water	habitation	road	cultivation	slash_burn	cloudy	partly_cloudy	conventional_mine	bare_ground	artisinal_mine	blooming	selective_logging	blow_down
+haze	2697	2670	672	0	613	129	394	202	3	0	0	2	41	5	4	5	0
+primary	2670	37513	11972	27668	7001	3469	7728	4455	209	0	7175	94	683	324	332	340	98
+agriculture	672	11972	12315	9150	2712	2737	6034	3377	119	0	2493	24	225	38	32	65	22
+clear	0	27668	9150	28431	5502	3090	6295	3527	173	0	0	70	747	307	311	308	85
+water	613	7001	2712	5502	7411	915	2125	868	24	0	1295	26	206	299	16	49	3
+habitation	129	3469	2737	3090	915	3660	2786	895	41	0	441	36	163	29	4	13	3
+road	394	7728	6034	6295	2125	2786	8071	1294	36	0	1382	59	323	110	10	151	2
+cultivation	202	4455	3377	3527	868	895	1294	4477	126	0	748	4	89	18	35	58	8
+slash_burn	3	209	119	173	24	41	36	126	209	0	33	0	10	0	2	2	2
+cloudy	0	0	0	0	0	0	0	0	0	2089	0	0	0	0	0	0	0
+partly_cloudy	0	7175	2493	0	1295	441	1382	748	33	0	7261	28	74	27	17	27	13
+conventional_mine	2	94	24	70	26	36	59	4	0	0	28	100	10	4	0	0	0
+bare_ground	41	683	225	747	206	163	323	89	10	0	74	10	862	40	3	13	4
+artisinal_mine	5	324	38	307	299	29	110	18	0	0	27	4	40	339	0	6	0
+blooming	4	332	32	311	16	4	10	35	2	0	17	0	3	0	332	7	1
+selective_logging	5	340	65	308	49	13	151	58	2	0	27	0	13	6	7	340	1
+blow_down	0	98	22	85	3	3	2	8	2	0	13	0	4	0	1	1	98
+
+Each image should have exactly one weather label:
+
+weather_labels = ['clear', 'partly_cloudy', 'haze', 'cloudy']
+make_cooccurence_matrix(weather_labels)
+clear	partly_cloudy	haze	cloudy
+clear	28431	0	0	0
+partly_cloudy	0	7261	0	0
+haze	0	0	2697	0
+cloudy	0	0	0	2089
+
+But the land labels may overlap:
+
+land_labels = ['primary', 'agriculture', 'water', 'cultivation', 'habitation']
+make_cooccurence_matrix(land_labels)
+primary	agriculture	water	cultivation	habitation
+primary	37513	11972	7001	4455	3469
+agriculture	11972	12315	2712	3377	2737
+water	7001	2712	7411	868	915
+cultivation	4455	3377	868	4477	895
+habitation	3469	2737	915	895	3660
+
+The rarer labels have very little overlap:
+
+rare_labels = [l for l in label_list if labels_df[label_list].sum()[l] < 2000]
+make_cooccurence_matrix(rare_labels)
+
+for w in weather_labels:
+    df_weather_subset = labels_df.loc[labels_df[w] == 1, label_list].drop([w], axis=1)
+    weather_percent_subset = df_weather_subset.sum(axis =0) / df_weather_subset.shape[0]
+    weather_percent_subset = weather_percent_subset[weather_percent_subset >0].sort_values(ascending=False)
+    fig = px.bar(x=weather_percent_subset.index, y=weather_percent_subset.values,  
+                 labels={'x':'label', 'y':f'Another labels given {w} label'})
+    fig.update_layout(title_text=f"Main label: {w}", yaxis_tickformat=',.0%')
+    fig.show()
+Inspect images
+Let's display an image and visualize the pixel values. Here we will pick an image, load every single single band, then create RGB stack. These raw images are 16-bit (from 0 to 65535), and contain red, green, blue, and Near infrared (NIR) channels. In this example, we are discarding the NIR band just to simplify the steps to visualize the image. However, you should probably keep it for ML classification.
+
+The files can be easily read into numpy arrays with the skimage.
+
+def sample_images(tags, n=None):
+    """Randomly sample n images with the specified tags."""
+    condition = True
+    if isinstance(tags, string_types):
+        raise ValueError("Pass a list of tags, not a single tag.")
+    for tag in tags:
+        condition = condition & labels_df[tag] == 1
+    if n is not None:
+        return labels_df[condition].sample(n)
+    else:
+        return labels_df[condition]
+    
+
+def plot_rgbn_histo(r, g, b):
+    for slice_, name, color in ((r,'r', 'red'),(g,'g', 'green'),(b,'b', 'blue')):
+        plt.hist(slice_.ravel(), bins=100, 
+                 range=[0,rgb_image.max()], 
+                 label=name, color=color, histtype='step')
+    plt.legend()
+def load_image(filename):
+    '''Look through the directory tree to find the image you specified
+    (e.g. train_10.tif vs. train_10.jpg)'''
+    for dirname in os.listdir(PLANET_KAGGLE_ROOT):
+        path = os.path.abspath(os.path.join(PLANET_KAGGLE_ROOT, dirname, filename))
+        if os.path.exists(path):
+            #print('Found image {}'.format(path))
+            return io.imread(path)
+    # if you reach this line, you didn't find the image you're looking for
+    print('Load failed: could not find image {}'.format(path))
+Let's look at an individual image. First, we'll plot a histogram of pixel values in each channel. Note how the intensities are distributed in a relatively narrow region of the dynamic range
+
+def get_rgb_image(labels=['primary', 'water', 'road'], n_samples=1):
+    s = sample_images(labels, n=n_samples)
+    fnames = s.loc[:, "image_name"].apply(lambda fname: '{}.{}'.format(fname, "jpg"))
+    rgb_images = []
+    for name in fnames:
+    # find the image in the data directory and load it
+        bgr_image = load_image(name)
+        rgb_image = bgr_image[:, :, [2,1,0]]
+        rgb_images.append(rgb_image)
+    return np.array(rgb_images)
+
+
+def get_r_g_b_channels(rgb_image):
+    b, g, r = rgb_image[:, :, 2], rgb_image[:, :, 1], rgb_image[:, :, 0]
+    return r, g, b
+rgb_images= get_rgb_image(labels=['primary', 'water', 'road'], n_samples=5)
+rgb_image = rgb_images[0]
+r, g, b = get_r_g_b_channels(rgb_image)
+# plot a histogram of rgbn values
+plot_rgbn_histo(r, g, b)
+
+We can look at each channel individually:
+
+# Plot the bands
+fig = plt.figure()
+fig.set_size_inches(9, 3)
+for i, (x, c) in enumerate(((r, 'r'), (g, 'g'), (b, 'b'))):
+    a = fig.add_subplot(1, 3, i+1)
+    a.set_title(c)
+    plt.imshow(x)
+
+plt.imshow(rgb_image)
+<matplotlib.image.AxesImage at 0x7fabe06dd5c0>
+
+Calibrate the image
+Find the mean for the colors across the entire dataset. It takes agess, I'm unable to commit it due to the long performance.
+
+all_image_paths = os.listdir(PLANET_KAGGLE_JPEG_DIR)
+random.shuffle(all_image_paths)
+n = 200
+
+ref_colors = [[],[],[]]
+for _file in tqdm(all_image_paths[:n]):
+    # keep only the first 3 bands, RGB
+    _img = mpimg.imread(os.path.join(PLANET_KAGGLE_JPEG_DIR, _file))[:,:,:3]
+    # Flatten 2-D to 1-D
+    _data = _img.reshape((-1,3))
+    # Dump pixel values to aggregation buckets
+    for i in range(3): 
+        ref_colors[i] = ref_colors[i] + _data[:,i].tolist()
+    
+ref_colors = np.array(ref_colors)
+100%|██████████| 200/200 [00:45<00:00,  4.39it/s]
+ref_colors = np.array(ref_colors)
+ref_color_mean = [np.mean(ref_colors[i]) for i in range(3)]
+ref_color_std = [np.std(ref_colors[i]) for i in range(3)]
+print("ref_color_mean:")
+print(ref_color_mean)
+print("ref_color_std:")
+print(ref_color_std)
+ref_color_mean:
+[77.88056297302246, 85.93308403015136, 76.22379783630372]
+ref_color_std:
+[44.42762610520416, 38.612311885469836, 37.68404703414758]
+def calibrate_image(rgb_img):
+    calibrated_img = rgb_image.copy().astype('float32')
+    for i in range(3):
+        calibrated_img[:,:,i] = (rgb_img[:,:,i] -  np.mean(rgb_img[:,:,i])) / np.std(rgb_img[:,:,i])
+        calibrated_img[:,:,i] = calibrated_img[:,:,i] * ref_color_std[i] + ref_color_mean[i]
+    return calibrated_img.astype('uint8')
+img = calibrate_image(rgb_image)
+plt.imshow(img)
+<matplotlib.image.AxesImage at 0x7fabdd7c34e0>
+
+Sample images
+def display_multiple_images(rgb_images):
+    col, row = (1, len(rgb_images)) if len(rgb_images) <=4 else ((len(rgb_images) / 4) + 1, 4)
+    fig = plt.figure()
+    fig.set_size_inches(12, 3 * col)
+    for i, _img in enumerate(rgb_images):
+        a = fig.add_subplot(col, row, i+1)
+        plt.imshow(calibrate_image(_img))
+# provide labels to display sample images
+labels = ['water']
+rgb_images= get_rgb_image(labels=labels, n_samples=4)
+display_multiple_images(rgb_images)
+
+# provide labels to display sample images
+labels = ['primary']
+rgb_images= get_rgb_image(labels=labels, n_samples=4)
+display_multiple_images(rgb_images)
+
+# provide labels to display sample images
+labels = ['agriculture']
+rgb_images= get_rgb_image(labels=labels, n_samples=4)
+display_multiple_images(rgb_images)
+
+# provide labels to display sample images
+labels = ['cultivation']
+rgb_images= get_rgb_image(labels=labels, n_samples=4)
+display_multiple_images(rgb_images)
+
+# provide labels to display sample images
+labels = ['habitation']
+rgb_images= get_rgb_image(labels=labels, n_samples=4)
+display_multiple_images(rgb_images)
+
+# provide labels to display sample images
+labels = ['selective_logging']
+rgb_images= get_rgb_image(labels=labels, n_samples=4)
+display_multiple_images(rgb_images)
+
+# provide labels to display sample images
+labels = ['slash_burn']
+rgb_images= get_rgb_image(labels=labels, n_samples=4)
+display_multiple_images(rgb_images)
+
+# provide labels to display sample images
+labels = ['blow_down']
+rgb_images= get_rgb_image(labels=labels, n_samples=4)
+display_multiple_images(rgb_images)
+
+# provide labels to display sample images
+labels = ['blooming']
+rgb_images= get_rgb_image(labels=labels, n_samples=4)
+display_multiple_images(rgb_images)
+
+# provide labels to display sample images
+labels = ['conventional_mine']
+rgb_images= get_rgb_image(labels=labels, n_samples=4)
+display_multiple_images(rgb_images)
+
+# provide labels to display sample images
+labels = ['artisinal_mine']
+rgb_images= get_rgb_image(labels=labels, n_samples=4)
+display_multiple_images(rgb_images)
+
